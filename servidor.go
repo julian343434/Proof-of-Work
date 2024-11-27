@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"os"
@@ -15,13 +16,25 @@ type WorkPackage struct {
 	RangeEnd   string
 }
 
-func handleConnection(conn net.Conn, work WorkPackage, minerID int) {
+func handleConnection(conn net.Conn, work WorkPackage, minerID int, responseChan chan string, wg *sync.WaitGroup) {
 	defer conn.Close()
+	defer wg.Done()
 
 	// Enviar el paquete de trabajo al cliente
 	fmt.Fprintf(conn, "Texto: %s\nCeros: %d\nRango: %s - %s\n", work.Text, work.ZeroCount, work.RangeStart, work.RangeEnd)
 	fmt.Printf("Trabajo enviado al minero %d (%s): Texto=%s, Ceros=%d, Rango=%s - %s\n",
 		minerID, conn.RemoteAddr(), work.Text, work.ZeroCount, work.RangeStart, work.RangeEnd)
+
+	// Esperar respuesta del cliente
+	reader := bufio.NewReader(conn)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Printf("Error al leer respuesta del minero %d: %s\n", minerID, err)
+		responseChan <- fmt.Sprintf("Minero %d: error al procesar", minerID)
+		return
+	}
+
+	responseChan <- fmt.Sprintf("Minero %d respondió: %s", minerID, response)
 }
 
 func generateRanges(numMiners int, paddingLength int) []WorkPackage {
@@ -92,12 +105,10 @@ func main() {
 		return
 	}
 
-	// Mostrar la información inicial
 	fmt.Printf("Servidor iniciado con los parámetros:\n")
 	fmt.Printf("- IP: %s\n- Puerto: %s\n- Texto: %s\n- Mineros: %d\n- Ceros: %d\n- Longitud del padding: %d\n",
 		ip, port, text, numMiners, numZeros, paddingLength)
 
-	// Iniciar el servidor
 	ln, err := net.Listen("tcp", ip+":"+port)
 	if err != nil {
 		fmt.Println("Error al iniciar el servidor:", err)
@@ -108,6 +119,7 @@ func main() {
 	var wg sync.WaitGroup
 	var connections []net.Conn
 	var mutex sync.Mutex
+	responseChan := make(chan string, numMiners)
 
 	fmt.Println("Esperando conexiones de los mineros...")
 
@@ -140,12 +152,19 @@ func main() {
 		}
 		wg.Add(1)
 
-		go func(conn net.Conn, work WorkPackage, minerID int) {
-			defer wg.Done()
-			handleConnection(conn, work, minerID)
-		}(conn, work, i+1)
+		go handleConnection(conn, work, i+1, responseChan, &wg)
 	}
 
-	wg.Wait()
-	fmt.Println("Todos los trabajos fueron enviados.")
+	// Leer respuestas
+	go func() {
+		wg.Wait()
+		close(responseChan)
+	}()
+
+	// Mostrar todas las respuestas recibidas
+	for response := range responseChan {
+		fmt.Println(response)
+	}
+
+	fmt.Println("Todos los trabajos fueron procesados y respondidos.")
 }
